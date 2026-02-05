@@ -1,0 +1,30 @@
+{
+  "name": "倾城之鉴---女士专属ai美学与健康管家",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "git:push": "powershell -ExecutionPolicy Bypass -File ./git-push.ps1"
+  },
+  "dependencies": {
+    "@google/genai": "^1.39.0",
+    "@supabase/supabase-js": "^2.93.3",
+    "@types/bcryptjs": "^2.4.6",
+    "bcryptjs": "^3.0.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@types/uuid": "^10.0.0",
+    "@vercel/node": "^5.5.28",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0",
+    "vite-plugin-pwa": "^1.2.0"
+  }
+}

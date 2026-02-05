@@ -1,0 +1,7 @@
+{
+  "name": "倾城之鉴 - 女士专属AI美学与健康管家",
+  "description": "一个专为女性设计的全方位AI助手，涵盖虚拟试穿、发型参考、颜值评分、中医舌诊面色分析及传统面相学。",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
