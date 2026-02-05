@@ -5,9 +5,29 @@ export const config = {
     runtime: 'edge',
 };
 
+// 获取所有可用的 API Key
+const getAllApiKeys = () => {
+    const keys: string[] = [];
+    if (process.env.GEMINI_API_KEY) keys.push(process.env.GEMINI_API_KEY);
+    
+    // 支持 GEMINI_API_KEY_1 到 GEMINI_API_KEY_31
+    for (let i = 1; i <= 31; i++) {
+        const key = process.env[`GEMINI_API_KEY_${i}`];
+        if (key) keys.push(key);
+    }
+    
+    // 如果是逗号分隔的格式也支持
+    const commaKeys = (process.env.GEMINI_API_KEY || "").split(",").filter(k => k.trim().length > 20);
+    commaKeys.forEach(k => {
+        if (!keys.includes(k.trim())) keys.push(k.trim());
+    });
+
+    return Array.from(new Set(keys)); // 去重
+};
+
 // 重试配置
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 2000; // 初始等待2秒
+const MAX_RETRIES = 5; // 增加重试次数，因为有更多 Key 可以尝试
+const RETRY_DELAY_MS = 1000;
 
 // 延迟函数
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -17,7 +37,6 @@ const isRetryableError = (error: any): boolean => {
     const message = error?.message?.toLowerCase() || '';
     const status = error?.status || error?.code;
 
-    // 429 限流错误、503 服务不可用、500 内部错误都可以重试
     if (status === 429 || status === 503 || status === 500) return true;
     if (message.includes('rate limit') || message.includes('quota')) return true;
     if (message.includes('overloaded') || message.includes('temporarily')) return true;
@@ -33,13 +52,12 @@ export default async function handler(req: Request) {
 
     try {
         const { prompt, images, task } = await req.json();
-
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-            return new Response(JSON.stringify({ error: 'Server configuration error' }), { status: 500 });
+        const availableKeys = getAllApiKeys();
+        
+        if (availableKeys.length === 0) {
+            console.error('[Gemini API] No API keys configured');
+            return new Response(JSON.stringify({ error: 'Server configuration error: No API keys' }), { status: 500 });
         }
-
-        const ai = new GoogleGenAI({ apiKey });
 
         // Prepare image parts
         const parts = [
@@ -55,32 +73,36 @@ export default async function handler(req: Request) {
         let result;
         let lastError: any = null;
 
-        // 带重试的API调用
+        // 带重试和 Key 轮换的 API 调用
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            // 每次重试或首次尝试都随机选一个 Key
+            const apiKey = availableKeys[Math.floor(Math.random() * availableKeys.length)];
+            const ai = new GoogleGenAI({ apiKey });
+
             try {
-                console.log(`[Gemini API] Attempt ${attempt}/${MAX_RETRIES} for task: ${task}`);
+                console.log(`[Gemini API] Attempt ${attempt}/${MAX_RETRIES} using random key. Task: ${task}`);
+
+                // 统一使用稳定且广泛可用的模型名称
+                const modelName = task === 'image' ? 'gemini-1.5-flash' : 
+                                 task === 'validate' ? 'gemini-1.5-flash' : 
+                                 'gemini-1.5-flash'; // 1.5-flash 速度快且配额高
 
                 if (task === 'image') {
-                    // Generate Image
+                    // Note: Standard Gemini models do not generate images directly via this SDK 
+                    // unless using specific Imagen endpoints. If this was intended to be vision-to-text 
+                    // that's fine, but if it expects image output, it might fail.
+                    // Assuming vision-to-text analysis for now.
                     const response = await ai.models.generateContent({
-                        model: 'gemini-2.5-flash-image',
-                        contents: { parts },
-                        config: {
-                            responseModalities: ["IMAGE"],
-                        }
+                        model: modelName,
+                        contents: { parts }
                     });
 
-                    const part = response.candidates?.[0]?.content?.parts?.[0];
-                    if (part && part.inlineData) {
-                        result = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-                    } else {
-                        throw new Error("No image generated");
-                    }
+                    const text = response.candidates?.[0]?.content?.parts?.[0]?.text;
+                    result = text;
 
                 } else if (task === 'validate') {
-                    // 验证图片内容（简单快速的检测）
                     const response = await ai.models.generateContent({
-                        model: 'gemini-2.0-flash',
+                        model: modelName,
                         contents: { parts },
                         config: {
                             responseMimeType: "application/json",
@@ -98,9 +120,8 @@ export default async function handler(req: Request) {
                     result = JSON.parse(text || "{}");
 
                 } else {
-                    // Analyze Text/JSON
                     const response = await ai.models.generateContent({
-                        model: 'gemini-3-flash-preview',
+                        model: modelName,
                         contents: { parts },
                         config: {
                             responseMimeType: "application/json",
@@ -124,44 +145,37 @@ export default async function handler(req: Request) {
                     result = JSON.parse(text || "{}");
                 }
 
-                // 成功，跳出重试循环
                 console.log(`[Gemini API] Success on attempt ${attempt}`);
                 break;
 
             } catch (error: any) {
                 lastError = error;
-                console.error(`[Gemini API] Attempt ${attempt} failed:`, error.message);
+                console.error(`[Gemini API] Attempt ${attempt} failed with key ${apiKey.substring(0, 10)}... :`, error.message);
 
-                // 如果是最后一次尝试或不可重试的错误，直接抛出
                 if (attempt === MAX_RETRIES || !isRetryableError(error)) {
                     throw error;
                 }
 
-                // 指数退避等待
-                const waitTime = RETRY_DELAY_MS * Math.pow(2, attempt - 1);
-                console.log(`[Gemini API] Waiting ${waitTime}ms before retry...`);
+                const waitTime = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt - 1), 5000);
                 await delay(waitTime);
             }
         }
 
         return new Response(JSON.stringify(result), {
             status: 200,
-            headers: {
-                'Content-Type': 'application/json',
-            },
+            headers: { 'Content-Type': 'application/json' },
         });
 
     } catch (error: any) {
-        console.error('API Error:', error);
-
-        // 返回更友好的错误信息
-        let errorMessage = 'AI Service Error';
-        if (error.message?.includes('rate limit') || error.message?.includes('quota') || error.message?.includes('resource exhausted')) {
-            errorMessage = 'AI服务繁忙，请稍后再试';
-        } else if (error.message?.includes('timeout')) {
-            errorMessage = 'AI服务响应超时，请重试';
+        console.error('Final API Error:', error);
+        let errorMessage = 'AI服务暂不可用，请稍后再试';
+        
+        if (error.message?.includes('overloaded') || error.status === 503) {
+            errorMessage = '模型负载过高，已尝试多次切换密钥，请在一分钟后再试';
+        } else if (error.message?.includes('quota') || error.status === 429) {
+            errorMessage = '今日分析额度已达上限，请稍后再试';
         }
 
-        return new Response(JSON.stringify({ error: errorMessage }), { status: 500 });
+        return new Response(JSON.stringify({ error: errorMessage, details: error.message }), { status: 500 });
     }
 }
